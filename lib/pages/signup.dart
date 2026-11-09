@@ -7,6 +7,8 @@ import 'package:google_sign_in/google_sign_in.dart';
 import './home.dart';
 import '../services/user_firestore_service.dart';
 import '../ui/neo.dart';
+import '../services/platform_flags.dart';
+import '../services/windows_google_auth.dart';
 import '../ui/google_logo.dart';
 import '../ui/splash_page.dart';
 
@@ -226,6 +228,12 @@ class _SignUpPageState extends State<SignUpPage> {
       // ANDROID / IOS
       // --------------------------------------------------------
 
+      else if (isWindows) {
+        userCredential = await FirebaseAuth.instance.signInWithCredential(
+          await WindowsGoogleAuth.signIn(),
+        );
+      }
+
       else {
         await GoogleSignIn.instance.signOut();
 
@@ -394,7 +402,7 @@ class _SignUpPageState extends State<SignUpPage> {
                   ),
                   child: Center(
                     child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 440),
+                      constraints: const BoxConstraints(maxWidth: 480),
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         crossAxisAlignment: CrossAxisAlignment.stretch,

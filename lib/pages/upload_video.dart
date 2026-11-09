@@ -8,6 +8,7 @@ import 'package:logging/logging.dart';
 
 import '../services/admin_service.dart';
 import '../services/google_drive_service.dart';
+import '../services/platform_flags.dart';
 import '../ui/manage_ui.dart';
 import '../ui/media.dart';
 import '../ui/neo.dart';
@@ -146,6 +147,14 @@ class _UploadTestPageState extends State<UploadTestPage> {
     if (!isAdmin) {
       showMessage(
         'Only admin can upload videos',
+        isError: true,
+      );
+      return;
+    }
+
+    if (isWindows) {
+      showMessage(
+        'Direct Drive upload is not available on Windows. Use the Android/web app or the Drive Agent.',
         isError: true,
       );
       return;
@@ -502,7 +511,7 @@ class _UploadTestPageState extends State<UploadTestPage> {
     return NeoScaffold(
       overline: 'Admin // Upload',
       title: 'Direct Upload',
-      maxWidth: 640,
+      maxWidth: 720,
       body: ListView(
         keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
         padding: const EdgeInsets.fromLTRB(16, 10, 16, 40),

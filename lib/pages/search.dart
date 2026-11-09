@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import '../ui/media.dart';
+import '../ui/desktop.dart';
 import '../ui/neo.dart';
 import '../ui/refresh.dart';
 import 'video_play.dart';
@@ -183,7 +184,7 @@ physics: const AlwaysScrollableScrollPhysics(),
         child: SafeArea(
           child: Column(
             children: [
-              Padding(
+              CenterMax(child: Padding(
                 padding: const EdgeInsets.fromLTRB(12, 10, 16, 14),
                 child: Row(
                   children: [
@@ -200,8 +201,8 @@ physics: const AlwaysScrollableScrollPhysics(),
                     ),
                   ],
                 ),
-              ),
-              Expanded(child: body),
+              )),
+              Expanded(child: CenterMax(child: body)),
             ],
           ),
         ),

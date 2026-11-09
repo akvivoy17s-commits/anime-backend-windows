@@ -1,9 +1,14 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart';
 
 import '../services/download_models.dart';
+import '../services/platform_flags.dart';
 import '../services/download_service.dart';
 import '../services/session_service.dart';
+import '../ui/manage_ui.dart';
 import '../ui/media.dart';
+import '../ui/desktop.dart';
 import '../ui/neo.dart';
 import 'offline_player.dart';
 
@@ -88,10 +93,12 @@ class _DownloadsPageState extends State<DownloadsPage> with WidgetsBindingObserv
         ),
       );
 
-  Widget _list(List<Widget> children) => ListView(
-        physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
-        padding: const EdgeInsets.only(top: 14, bottom: 24),
-        children: children,
+  Widget _list(List<Widget> children) => CenterMax(
+        child: ListView(
+          physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
+          padding: const EdgeInsets.only(top: 14, bottom: 24),
+          children: children,
+        ),
       );
 
   @override
@@ -114,6 +121,7 @@ class _DownloadsPageState extends State<DownloadsPage> with WidgetsBindingObserv
                       child: _notice('Downloads are disabled by the administrator. Your downloaded videos still play offline.'),
                     ),
             ),
+            _locationCard(),
             // Same pill tab design as Manage Videos (Videos | Playlists).
             Container(
               margin: const EdgeInsets.fromLTRB(16, 0, 16, 0),
@@ -176,6 +184,57 @@ class _DownloadsPageState extends State<DownloadsPage> with WidgetsBindingObserv
         );
       },
     );
+  }
+
+  // ---------------------------------------------------------------- download location
+  Widget _locationCard() => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+        child: ValueListenableBuilder<String>(
+          valueListenable: DownloadService.location,
+          builder: (_, __, ___) => FutureBuilder<String>(
+            future: DownloadService.currentFolder(),
+            builder: (_, snap) => Container(
+              padding: const EdgeInsets.fromLTRB(14, 10, 8, 10),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.28),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: Neo.line),
+              ),
+              child: Row(children: [
+                const Icon(Icons.folder_rounded, color: Neo.cyan, size: 22),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    const Text('DOWNLOAD LOCATION',
+                        style: TextStyle(color: Neo.muted, fontFamily: Neo.mono, fontSize: 10, letterSpacing: 1.6)),
+                    const SizedBox(height: 3),
+                    Text(
+                      snap.data ?? '…',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: Neo.text, fontSize: 12.5),
+                    ),
+                  ]),
+                ),
+                if (Platform.isAndroid || isWindows)
+                  TextButton(
+                    onPressed: _changeLocation,
+                    child: const Text('CHANGE', style: TextStyle(color: Neo.cyan, fontWeight: FontWeight.w800)),
+                  ),
+              ]),
+            ),
+          ),
+        ),
+      );
+
+  Future<void> _changeLocation() async {
+    final msg = await showNeoSheet<String>(
+      context,
+      title: 'Download location',
+      sub: 'for new downloads',
+      child: const _LocationSheet(),
+    );
+    if (msg != null && mounted) neoSnack(context, msg, error: msg.startsWith("This folder"));
   }
 
   Widget _notice(String t) => Container(
@@ -355,4 +414,98 @@ class _DownloadsPageState extends State<DownloadsPage> with WidgetsBindingObserv
         ),
         child: Text(t, style: TextStyle(color: c, fontSize: 10, fontFamily: Neo.mono, letterSpacing: 0.5)),
       );
+}
+
+
+/// Bottom sheet: pick where NEW downloads are saved.
+class _LocationSheet extends StatefulWidget {
+  const _LocationSheet();
+
+  @override
+  State<_LocationSheet> createState() => _LocationSheetState();
+}
+
+class _LocationSheetState extends State<_LocationSheet> {
+  final _path = TextEditingController();
+  bool _busy = false;
+  String _err = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _path.text = DownloadService.location.value;
+  }
+
+  @override
+  void dispose() {
+    _path.dispose();
+    super.dispose();
+  }
+
+  Future<void> _apply(String path) async {
+    setState(() {
+      _busy = true;
+      _err = '';
+    });
+    final r = await DownloadService.setLocation(path);
+    if (!mounted) return;
+    if (r.ok) {
+      Navigator.pop(context, path.isEmpty ? 'Downloads will use app storage.' : 'New downloads will be saved in $path');
+    } else {
+      setState(() {
+        _busy = false;
+        _err = r.message;
+      });
+    }
+  }
+
+  Widget _option(IconData icon, String title, String sub, String path) {
+    final selected = DownloadService.location.value == path;
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      enabled: !_busy,
+      leading: Icon(icon, color: selected ? Neo.cyan : Neo.muted),
+      title: Text(title, style: const TextStyle(color: Neo.text, fontWeight: FontWeight.w700)),
+      subtitle: Text(sub, style: const TextStyle(color: Neo.muted, fontSize: 11.5)),
+      trailing: selected ? const Icon(Icons.check_circle_rounded, color: Neo.cyan) : null,
+      onTap: () => _apply(path),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(20, 4, 20, 20 + MediaQuery.of(context).viewInsets.bottom),
+      child: SingleChildScrollView(
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          _option(Icons.lock_rounded, 'App storage (default)', 'Private to this app, not visible in file manager', ''),
+          for (final e in DownloadService.presetFolders.entries)
+            _option(Icons.folder_open_rounded, e.key, e.value, e.value),
+          const SizedBox(height: 8),
+          NeoInput(
+            controller: _path,
+            label: 'Custom folder path',
+            hint: isWindows ? r'C:\Users\you\Videos\My Anime' : '/storage/emulated/0/Movies/My Anime',
+            icon: Icons.edit_location_alt_rounded,
+          ),
+          if (_err.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(_err, style: const TextStyle(color: Neo.pink, fontSize: 12.5)),
+          ],
+          const SizedBox(height: 14),
+          NeoButton(
+            label: 'USE THIS FOLDER',
+            icon: Icons.check_rounded,
+            loading: _busy,
+            onTap: _busy ? null : () => _apply(_path.text),
+          ),
+          const SizedBox(height: 10),
+          const Text(
+            'Only new downloads use this folder. Videos you already downloaded stay where they are.',
+            style: TextStyle(color: Neo.muted, fontSize: 11.5),
+          ),
+        ]),
+      ),
+    );
+  }
 }

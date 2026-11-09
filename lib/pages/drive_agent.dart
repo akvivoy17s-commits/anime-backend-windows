@@ -455,7 +455,11 @@ class _DriveAgentPageState extends State<DriveAgentPage> {
     final id = '${it['file_id']}';
     final edited = _edits.containsKey(id);
     final sel = _sel.contains(id);
-    final se = _category == 'series' ? '  ·  S${m['season']} E${m['episode']}' : '';
+    final sn = int.tryParse('${m['season']}') ?? 0;
+    final ep = int.tryParse('${m['episode']}') ?? 0;
+    final se = _category == 'series' && (sn > 0 || ep > 0)
+        ? '  ·  ${[if (sn > 0) 'S$sn', if (ep > 0) 'E$ep'].join(' ')}'
+        : '';
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: !editable

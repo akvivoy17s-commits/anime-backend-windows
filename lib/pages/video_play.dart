@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as rnd;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
@@ -8,8 +9,10 @@ import 'package:video_player/video_player.dart';
 import '../services/api_client.dart';
 import '../services/last_watched_service.dart';
 import '../ui/download_button.dart';
+import '../services/platform_flags.dart';
 import '../services/screen_awake_service.dart';
 import '../services/stream_perf.dart';
+import '../ui/desktop.dart';
 import '../ui/manage_ui.dart';
 import '../ui/media.dart';
 import '../ui/neo.dart';
@@ -54,6 +57,16 @@ class _VideoPlayPageState extends State<VideoPlayPage>
   bool _hasError = false;
   bool _fg = true; // app in foreground (screen-awake only matters then)
   bool _showControls = true;
+  Timer? _ctlTimer;
+
+  void _pokeControls() {
+    if (!_showControls && mounted) setState(() => _showControls = true);
+    _ctlTimer?.cancel();
+    _ctlTimer = Timer(const Duration(seconds: 4), () {
+      if (mounted && (_controller?.value.isPlaying ?? false)) setState(() => _showControls = false);
+    });
+  }
+
 
   String _errorMessage = '';
   String _title = '';
@@ -112,6 +125,7 @@ class _VideoPlayPageState extends State<VideoPlayPage>
   @override
   void initState() {
     super.initState();
+    HardwareKeyboard.instance.addHandler(_onKey);
     WidgetsBinding.instance.addObserver(this);
     ApiClient.wake(); // wake the backend now so Download etc. never hit a cold start
     _loadPage();
@@ -123,6 +137,8 @@ class _VideoPlayPageState extends State<VideoPlayPage>
 
   @override
   void dispose() {
+    _ctlTimer?.cancel();
+    HardwareKeyboard.instance.removeHandler(_onKey);
     WidgetsBinding.instance.removeObserver(this);
     _pullUi.dispose();
     _saveTimer?.cancel();
@@ -443,59 +459,65 @@ class _VideoPlayPageState extends State<VideoPlayPage>
       }
     }
 
-    var queue = List<String>.from(candidates);
-    while (queue.isNotEmpty) {
-      final url = queue.removeAt(0);
-      VideoPlayerController? testController;
+    // Drive often rejects/throttles a request once and accepts it a moment later,
+    // so go through all URL variants up to 3 times before giving up.
+    for (var round = 0; round < 3; round++) {
+      if (!mounted) return;
+      if (round > 0) await Future.delayed(Duration(milliseconds: 1200 * round));
+      var queue = List<String>.from(candidates);
+      while (queue.isNotEmpty) {
+        final url = queue.removeAt(0);
+        VideoPlayerController? testController;
 
-      try {
-        debugPrint('Trying video URL: $url');
+        try {
+          debugPrint('Trying video URL: $url');
 
-        testController = VideoPlayerController.networkUrl(
-          Uri.parse(url),
-          videoPlayerOptions: VideoPlayerOptions(mixWithOthers: false),
-        );
+          testController = VideoPlayerController.networkUrl(
+            Uri.parse(url),
+            videoPlayerOptions: VideoPlayerOptions(mixWithOthers: false),
+          );
 
-        // a link that hangs must not block the fallbacks
-        await testController.initialize().timeout(Duration(seconds: queue.isEmpty ? 25 : 10));
-        StreamPerf.record('player-ready', sw.elapsedMilliseconds,
-            note: cachedUrl == url ? 'cached url' : (url == candidates.first ? 'first candidate' : 'fallback'));
-        if (kStreamOptimizations) unawaited(StreamUrlCache.put(originalUrl, url));
+          // a link that hangs must not block the fallbacks
+          await testController.initialize().timeout(Duration(seconds: queue.isEmpty ? 30 : 15));
+          StreamPerf.record('player-ready', sw.elapsedMilliseconds,
+              note: cachedUrl == url ? 'cached url' : (url == candidates.first ? 'first candidate' : 'fallback'));
+          if (kStreamOptimizations) unawaited(StreamUrlCache.put(originalUrl, url));
 
-        await testController.setPlaybackSpeed(_playbackSpeed);
+          await testController.setPlaybackSpeed(_playbackSpeed);
 
-        // Resume from saved position (Continue Watching)
-        final startAt = resumeAt ?? widget.startAt;
-        if (startAt != null &&
-            startAt > Duration.zero &&
-            startAt < testController.value.duration) {
-          await testController.seekTo(startAt);
-        }
+          // Resume from saved position (Continue Watching)
+          final startAt = resumeAt ?? widget.startAt;
+          if (startAt != null &&
+              startAt > Duration.zero &&
+              startAt < testController.value.duration) {
+            await testController.seekTo(startAt);
+          }
 
-        if (!mounted) {
-          await testController.dispose();
+          if (!mounted) {
+            await testController.dispose();
+            return;
+          }
+
+          _controller = testController;
+
+          _controller!.addListener(_videoListener);
+
+          await _controller!.play();
+
+          debugPrint('VIDEO INITIALIZED SUCCESSFULLY');
+
           return;
-        }
+        } catch (e) {
+          debugPrint('FAILED VIDEO URL: $url');
 
-        _controller = testController;
+          debugPrint('VIDEO ERROR: $e');
 
-        _controller!.addListener(_videoListener);
-
-        await _controller!.play();
-
-        debugPrint('VIDEO INITIALIZED SUCCESSFULLY');
-
-        return;
-      } catch (e) {
-        debugPrint('FAILED VIDEO URL: $url');
-
-        debugPrint('VIDEO ERROR: $e');
-
-        await testController?.dispose();
-        if (url == cachedUrl) {
-          unawaited(StreamUrlCache.remove(originalUrl)); // stale -> forget it
-          // pick the fastest of the remaining variants instead of trying them one by one
-          if (kStreamOptimizations && queue.length > 1) queue = await StreamProbe.order(queue);
+          await testController?.dispose();
+          if (url == cachedUrl) {
+            unawaited(StreamUrlCache.remove(originalUrl)); // stale -> forget it
+            // pick the fastest of the remaining variants instead of trying them one by one
+            if (kStreamOptimizations && queue.length > 1) queue = await StreamProbe.order(queue);
+          }
         }
       }
     }
@@ -781,22 +803,30 @@ class _VideoPlayPageState extends State<VideoPlayPage>
         spacing: 10,
         runSpacing: 10,
         children: [
-          for (final l in _langOrder)
-            if (_availLangs.contains(l)) _langChip(l, closeSheet: true),
+          for (final l in _langOrder) _langChip(l, closeSheet: true),
         ],
       ),
     );
   }
 
   Widget _langChip(String lang, {bool closeSheet = false}) {
+    final available = _availLangs.contains(lang);
     final selected = lang == _activeLang;
     final color = selected ? Neo.cyan : Neo.muted;
     return GestureDetector(
       onTap: () {
         if (closeSheet) Navigator.pop(context);
+        if (!available) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('${_langLabel[lang]} is not available for this video.')),
+          );
+          return;
+        }
         _switchLanguage(lang);
       },
-      child: Container(
+      child: Opacity(
+        opacity: available ? 1 : 0.4,
+        child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
         decoration: BoxDecoration(
           color: color.withValues(alpha: selected ? 0.18 : 0.08),
@@ -813,6 +843,7 @@ class _VideoPlayPageState extends State<VideoPlayPage>
             letterSpacing: 1,
           ),
         ),
+      ),
       ),
     );
   }
@@ -933,6 +964,27 @@ class _VideoPlayPageState extends State<VideoPlayPage>
   // ============================================================
   // PLAY / PAUSE
   // ============================================================
+
+  /// Desktop keyboard: Space/K play-pause, <-/-> seek 10s, F fullscreen, Esc back.
+  bool _onKey(KeyEvent e) {
+    if (e is KeyUpEvent || !mounted) return false;
+    if (ModalRoute.of(context)?.isCurrent != true) return false;
+    final k = e.logicalKey;
+    if (k == LogicalKeyboardKey.space || k == LogicalKeyboardKey.keyK) {
+      _togglePlayPause();
+    } else if (k == LogicalKeyboardKey.arrowRight || k == LogicalKeyboardKey.keyL) {
+      _seekBy(const Duration(seconds: 10));
+    } else if (k == LogicalKeyboardKey.arrowLeft || k == LogicalKeyboardKey.keyJ) {
+      _seekBy(const Duration(seconds: -10));
+    } else if (k == LogicalKeyboardKey.keyF) {
+      _openFullscreen();
+    } else if (k == LogicalKeyboardKey.escape) {
+      Navigator.of(context).maybePop();
+    } else {
+      return false;
+    }
+    return true;
+  }
 
   Future<void> _togglePlayPause() async {
     final controller = _controller;
@@ -1124,6 +1176,9 @@ class _VideoPlayPageState extends State<VideoPlayPage>
   Widget _buildVideoPlayer() {
     final controller = _controller;
 
+    // Error is shown ONLY inside the player area (not the whole page).
+    if (_hasError) return _buildErrorScreen();
+
     if (controller == null || !controller.value.isInitialized) {
       // Loading animation lives ONLY inside the player area (not the whole page).
       return _loading ? _buildPlayerLoading() : const ColoredBox(color: Colors.black);
@@ -1149,6 +1204,9 @@ class _VideoPlayPageState extends State<VideoPlayPage>
       child: Stack(
         fit: StackFit.expand,
         children: [
+          Positioned.fill(
+            child: MouseRegion(opaque: false, onHover: (_) => _pokeControls()),
+          ),
           Container(
             color: Colors.black,
             child: Center(
@@ -1369,7 +1427,7 @@ class _VideoPlayPageState extends State<VideoPlayPage>
                         ),
                       ),
                       const Spacer(),
-                      if (_availLangs.length >= 2)
+                      ...[
                         Padding(
                           padding: const EdgeInsets.only(right: 8),
                           child: GestureDetector(
@@ -1405,6 +1463,7 @@ class _VideoPlayPageState extends State<VideoPlayPage>
                             ),
                           ),
                         ),
+                      ],
                       GestureDetector(
                         onTap: _showSettings,
                         child: Container(
@@ -1475,7 +1534,7 @@ class _VideoPlayPageState extends State<VideoPlayPage>
     if (id == null || id.isEmpty || !mounted) return;
     // keep the current landscape orientation (fullscreen or landscape page) across the switch
     _keepLandscape =
-        fullscreen || MediaQuery.of(context).orientation == Orientation.landscape;
+        fullscreen || (!isWindows && MediaQuery.of(context).orientation == Orientation.landscape);
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
@@ -1527,53 +1586,76 @@ class _VideoPlayPageState extends State<VideoPlayPage>
   }
 
   Widget _buildErrorScreen() {
-    return SafeArea(
-      child: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 340),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.cloud_off_rounded, color: Neo.pink, size: 58),
-                const SizedBox(height: 16),
-                const Text(
-                  'Unable to play video',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: Neo.text,
-                    fontSize: 20,
-                    fontWeight: FontWeight.w800,
+    return Container(
+      color: Colors.black,
+      child: LayoutBuilder(
+        builder: (context, box) {
+          final compact = box.maxHeight < 260;
+          return Center(
+            child: Padding(
+              padding: EdgeInsets.symmetric(
+                  horizontal: 16, vertical: compact ? 6 : 16),
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 320),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.cloud_off_rounded,
+                          color: Neo.pink, size: compact ? 30 : 46),
+                      SizedBox(height: compact ? 4 : 10),
+                      const Text(
+                        'Unable to play video',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Neo.text,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        _errorMessage.isEmpty
+                            ? 'The video could not be loaded.'
+                            : _errorMessage,
+                        textAlign: TextAlign.center,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style:
+                            const TextStyle(color: Neo.muted, fontSize: 12),
+                      ),
+                      SizedBox(height: compact ? 8 : 14),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          SizedBox(
+                            width: 130,
+                            child: NeoButton(
+                              label: 'RETRY',
+                              icon: Icons.refresh_rounded,
+                              onTap: _loadPage,
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          SizedBox(
+                            width: 130,
+                            child: NeoGhostButton(
+                              label: 'Go Back',
+                              leading: const Icon(Icons.arrow_back_rounded,
+                                  color: Neo.text, size: 18),
+                              onTap: () => Navigator.pop(context),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  _errorMessage.isEmpty
-                      ? 'The video could not be loaded.'
-                      : _errorMessage,
-                  textAlign: TextAlign.center,
-                  maxLines: 5,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: Neo.muted, fontSize: 13.5),
-                ),
-                const SizedBox(height: 24),
-                NeoButton(
-                  label: 'RETRY',
-                  icon: Icons.refresh_rounded,
-                  onTap: _loadPage,
-                ),
-                const SizedBox(height: 12),
-                NeoGhostButton(
-                  label: 'Go Back',
-                  leading: const Icon(Icons.arrow_back_rounded,
-                      color: Neo.text, size: 20),
-                  onTap: () => Navigator.pop(context),
-                ),
-              ],
+              ),
             ),
-          ),
-        ),
+          );
+        },
       ),
     );
   }
@@ -1692,7 +1774,79 @@ class _VideoPlayPageState extends State<VideoPlayPage>
   // LOAD MORE VIDEOS
   // ============================================================
 
+  static const Set<String> _titleStop = {
+    'the', 'a', 'an', 'of', 'and', 'movie', 'film', 'part', 'season', 'dub',
+    'dubbed', 'sub', 'tamil', 'english', 'japanese', 'hindi', 'telugu', 'hd',
+    'full', 'episode', 'ep', 'new', 'version', 'special',
+  };
+
+  Set<String> _titleTokens(String title) => title
+      .toLowerCase()
+      .split(RegExp(r'[^\p{L}\p{N}]+', unicode: true))
+      .where((w) => w.length >= 2 && int.tryParse(w) == null && !_titleStop.contains(w))
+      .toSet();
+
+  /// Standalone movie (no playlist): "up next" = the other movies in RANDOM order,
+  /// but movies with a related name (same franchise) come first.
+  /// The first one in the list is also the auto-play next movie.
+  Future<List<DocumentSnapshot<Map<String, dynamic>>>> _loadMoreMovies() async {
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('videos')
+          .where('category', whereIn: const ['movies', 'Movies'])
+          .orderBy('createdAt', descending: true)
+          .limit(200)
+          .get();
+      final all = snap.docs.where((d) => d.data()['released'] != false).toList();
+
+      String titleOf(Map<String, dynamic> d) => _readString(d, ['title', 'name', 'videoTitle']);
+      String curTitle = _title;
+      for (final d in all) {
+        if (d.id == widget.videoId) curTitle = titleOf(d.data());
+      }
+      final curTokens = _titleTokens(curTitle);
+      final need = curTokens.length >= 2 ? 2 : 1;
+      final random = rnd.Random();
+
+      final related = <(int, double, DocumentSnapshot<Map<String, dynamic>>)>[];
+      final others = <DocumentSnapshot<Map<String, dynamic>>>[];
+      for (final d in all) {
+        if (d.id == widget.videoId) continue;
+        final shared = curTokens.isEmpty
+            ? 0
+            : _titleTokens(titleOf(d.data())).intersection(curTokens).length;
+        if (curTokens.isNotEmpty && shared >= need) {
+          related.add((shared, random.nextDouble(), d));
+        } else {
+          others.add(d);
+        }
+      }
+      // more shared words first, random inside the same score
+      related.sort((a, b) {
+        final c = b.$1.compareTo(a.$1);
+        return c != 0 ? c : a.$2.compareTo(b.$2);
+      });
+      others.shuffle(random);
+
+      final list = <DocumentSnapshot<Map<String, dynamic>>>[
+        for (final r in related) r.$3,
+        ...others,
+      ].take(40).toList();
+
+      _prevId = null;
+      _nextId = list.isEmpty ? null : list.first.id;
+      _nextUrl = list.isEmpty
+          ? ''
+          : _readString(list.first.data() ?? <String, dynamic>{}, ['videoUrl', 'url', 'videoURL']);
+      return list;
+    } catch (e) {
+      debugPrint('MORE MOVIES ERROR: $e');
+      return [];
+    }
+  }
+
   Future<List<DocumentSnapshot<Map<String, dynamic>>>> _loadMoreVideos() async {
+    if (widget.playlistId.trim().isEmpty) return _loadMoreMovies();
     final videoIds = await _getPlaylistVideoIds();
 
     if (videoIds.isEmpty) {
@@ -1727,6 +1881,12 @@ class _VideoPlayPageState extends State<VideoPlayPage>
     results.sort((a, b) {
       final aData = a.data() ?? {};
       final bData = b.data() ?? {};
+
+      int seasonOf(Map<String, dynamic> d) =>
+          int.tryParse(RegExp(r'\d+').firstMatch(_readString(d, ['season', 'seasonNumber']))?.group(0) ?? '') ?? 0;
+
+      final bySeason = seasonOf(aData).compareTo(seasonOf(bData));
+      if (bySeason != 0) return bySeason;
 
       final aEpisode = _getEpisodeNumber(aData);
 
@@ -2154,7 +2314,7 @@ class _VideoPlayPageState extends State<VideoPlayPage>
               ),
             ],
           ),
-          if (_availLangs.length >= 2) ...[
+          ...[
             const SizedBox(height: 14),
             Wrap(
               spacing: 8,
@@ -2163,8 +2323,7 @@ class _VideoPlayPageState extends State<VideoPlayPage>
               children: [
                 const Icon(Icons.translate_rounded,
                     size: 16, color: Neo.violet),
-                for (final l in _langOrder)
-                  if (_availLangs.contains(l)) _langChip(l),
+                for (final l in _langOrder) _langChip(l),
               ],
             ),
           ],
@@ -2177,16 +2336,88 @@ class _VideoPlayPageState extends State<VideoPlayPage>
 
   @override
   Widget build(BuildContext context) {
+    // A Windows window is always wider than tall: never use the phone "landscape = bare player" page there,
+    // otherwise the title, Download button, language chips and More Videos list disappear.
     final isLandscape =
-        MediaQuery.of(context).orientation == Orientation.landscape;
+        !isWindows && MediaQuery.of(context).orientation == Orientation.landscape;
 
     return Scaffold(
       backgroundColor: Neo.bg,
-      body: _hasError
-          ? _buildErrorScreen()
-          : isLandscape
-              ? _buildLandscapePage()
-              : _buildPortraitPage(),
+      body: LayoutBuilder(
+        builder: (context, c) {
+          if (Bp.isDesktop(c.maxWidth) && c.maxHeight >= 520) {
+            return _buildDesktopPage(c.maxWidth, c.maxHeight);
+          }
+          return isLandscape ? _buildLandscapePage() : _buildPortraitPage();
+        },
+      ),
+    );
+  }
+
+  Widget _buildDesktopPage(double w, double h) {
+    final side = w >= 1300 ? 420.0 : 360.0;
+    final playerW = ((h - 140) * 16 / 9).clamp(480.0, w - side);
+    final header = Padding(
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+      child: Row(children: [
+        GlassIconButton(
+          icon: Icons.arrow_back_ios_new_rounded,
+          onTap: () => Navigator.of(context).maybePop(),
+        ),
+      ]),
+    );
+    return SafeArea(
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              children: [
+                header,
+                const SizedBox(height: 10),
+                Center(
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(maxWidth: playerW),
+                    child: Container(
+                      margin: const EdgeInsets.symmetric(horizontal: 16),
+                      decoration: BoxDecoration(
+                        color: Colors.black,
+                        borderRadius: BorderRadius.circular(16),
+                        boxShadow: [
+                          BoxShadow(
+                              color: Neo.cyan.withValues(alpha: 0.16),
+                              blurRadius: 30,
+                              offset: const Offset(0, 8)),
+                        ],
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: AspectRatio(aspectRatio: 16 / 9, child: _buildVideoPlayer()),
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: Align(
+                    alignment: Alignment.topCenter,
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(maxWidth: playerW),
+                      child: ListView(
+                        children: [if (_title.isNotEmpty) _buildVideoInfo()],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Container(
+            width: side,
+            decoration: BoxDecoration(
+              color: Neo.bg2.withValues(alpha: 0.7),
+              border: Border(left: BorderSide(color: Neo.line)),
+            ),
+            child: ListView(children: [_buildRelatedVideos()]),
+          ),
+        ],
+      ),
     );
   }
 
@@ -2194,7 +2425,7 @@ class _VideoPlayPageState extends State<VideoPlayPage>
     return SafeArea(
       child: Center(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 960),
+          constraints: BoxConstraints(maxWidth: isWindows ? 1100 : 960),
           child: Column(
             children: [
               Container(
@@ -2283,6 +2514,16 @@ class _FullscreenVideoPage extends StatefulWidget {
 
 class _FullscreenVideoPageState extends State<_FullscreenVideoPage> {
   bool _showControls = true;
+  Timer? _ctlTimer;
+
+  void _pokeControls() {
+    if (!_showControls && mounted) setState(() => _showControls = true);
+    _ctlTimer?.cancel();
+    _ctlTimer = Timer(const Duration(seconds: 4), () {
+      if (mounted && (widget.controller.value.isPlaying)) setState(() => _showControls = false);
+    });
+  }
+
 
   late double _speed;
   late String _lang;
@@ -2294,6 +2535,7 @@ class _FullscreenVideoPageState extends State<_FullscreenVideoPage> {
   @override
   void initState() {
     super.initState();
+    HardwareKeyboard.instance.addHandler(_onKey);
 
     _speed = widget.playbackSpeed;
     _lang = widget.activeLang;
@@ -2307,6 +2549,8 @@ class _FullscreenVideoPageState extends State<_FullscreenVideoPage> {
 
   @override
   void dispose() {
+    _ctlTimer?.cancel();
+    HardwareKeyboard.instance.removeHandler(_onKey);
     widget.controller.removeListener(_videoListener);
 
     super.dispose();
@@ -2363,6 +2607,24 @@ class _FullscreenVideoPageState extends State<_FullscreenVideoPage> {
   // ============================================================
   // PLAY / PAUSE
   // ============================================================
+
+  bool _onKey(KeyEvent e) {
+    if (e is KeyUpEvent || !mounted) return false;
+    if (ModalRoute.of(context)?.isCurrent != true) return false;
+    final k = e.logicalKey;
+    if (k == LogicalKeyboardKey.space || k == LogicalKeyboardKey.keyK) {
+      _togglePlayPause();
+    } else if (k == LogicalKeyboardKey.arrowRight || k == LogicalKeyboardKey.keyL) {
+      _seekBy(const Duration(seconds: 10));
+    } else if (k == LogicalKeyboardKey.arrowLeft || k == LogicalKeyboardKey.keyJ) {
+      _seekBy(const Duration(seconds: -10));
+    } else if (k == LogicalKeyboardKey.escape || k == LogicalKeyboardKey.keyF) {
+      Navigator.pop(context);
+    } else {
+      return false;
+    }
+    return true;
+  }
 
   Future<void> _togglePlayPause() async {
     final controller = widget.controller;
@@ -2581,6 +2843,9 @@ class _FullscreenVideoPageState extends State<_FullscreenVideoPage> {
         child: Stack(
           fit: StackFit.expand,
           children: [
+            Positioned.fill(
+            child: MouseRegion(opaque: false, onHover: (_) => _pokeControls()),
+          ),
             Center(
               child: AspectRatio(
                 aspectRatio: ratio,
@@ -2721,9 +2986,13 @@ class _FullscreenVideoPageState extends State<_FullscreenVideoPage> {
                                   ),
                                 ),
                                 const Spacer(),
-                                if (widget.langs.length >= 2) ...[
+                                ...[
                                   GestureDetector(
-                                    onTap: _showLanguageSheet,
+                                    onTap: widget.langs.length >= 2
+                                        ? _showLanguageSheet
+                                        : () => ScaffoldMessenger.of(context).showSnackBar(
+                                              const SnackBar(content: Text('Only one language is available for this video.')),
+                                            ),
                                     child: Container(
                                       padding: const EdgeInsets.symmetric(
                                         horizontal: 12,
@@ -2847,4 +3116,4 @@ class _SpeedChip extends StatelessWidget {
       ),
     );
   }
-}
+} 

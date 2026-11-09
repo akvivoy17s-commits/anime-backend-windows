@@ -8,6 +8,8 @@ import 'home.dart';
 import 'signup.dart';
 import '../services/user_firestore_service.dart';
 import '../ui/neo.dart';
+import '../services/platform_flags.dart';
+import '../services/windows_google_auth.dart';
 import '../ui/google_logo.dart';
 import '../ui/splash_page.dart';
 
@@ -122,6 +124,17 @@ class _LoginPageState extends State<LoginPage> {
         if (credential.user != null) {
           await UserFirestoreService.saveSignedInUser(
             credential.user!,
+          );
+        }
+      } else if (isWindows) {
+        final UserCredential userCredential =
+            await FirebaseAuth.instance.signInWithCredential(
+          await WindowsGoogleAuth.signIn(),
+        );
+
+        if (userCredential.user != null) {
+          await UserFirestoreService.saveSignedInUser(
+            userCredential.user!,
           );
         }
       } else {
@@ -241,7 +254,7 @@ class _LoginPageState extends State<LoginPage> {
                   ),
                   child: Center(
                     child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 440),
+                      constraints: const BoxConstraints(maxWidth: 480),
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         crossAxisAlignment: CrossAxisAlignment.stretch,

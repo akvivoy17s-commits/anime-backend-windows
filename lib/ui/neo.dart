@@ -45,6 +45,27 @@ class Neo {
         indicatorColor: cyan.withValues(alpha: 0.18),
       ),
       progressIndicatorTheme: const ProgressIndicatorThemeData(color: cyan),
+      visualDensity: VisualDensity.standard,
+      // bottom sheets become a centered panel on wide windows instead of full width
+      bottomSheetTheme: const BottomSheetThemeData(
+        constraints: BoxConstraints(maxWidth: 640),
+      ),
+      scrollbarTheme: ScrollbarThemeData(
+        thickness: WidgetStateProperty.all(8),
+        radius: const Radius.circular(8),
+        thumbColor: WidgetStateProperty.resolveWith((s) => s.contains(WidgetState.hovered)
+            ? cyan.withValues(alpha: 0.65)
+            : Colors.white.withValues(alpha: 0.22)),
+      ),
+      tooltipTheme: TooltipThemeData(
+        waitDuration: const Duration(milliseconds: 400),
+        decoration: BoxDecoration(
+          color: surface,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: line),
+        ),
+        textStyle: const TextStyle(color: text, fontSize: 12),
+      ),
     );
   }
 }

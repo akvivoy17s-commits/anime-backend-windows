@@ -260,7 +260,7 @@ physics: const AlwaysScrollableScrollPhysics(),
       return NeoScaffold(
         overline: 'Account // Profile',
         title: 'Profile',
-        maxWidth: 600,
+        maxWidth: 720,
         body: list,
       );
     }
@@ -272,7 +272,7 @@ physics: const AlwaysScrollableScrollPhysics(),
         bottom: false,
         child: Center(
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 600),
+            constraints: const BoxConstraints(maxWidth: 720),
             child: Column(
               children: [
                 const PageHeader(overline: 'Account // Profile', title: 'Profile'),

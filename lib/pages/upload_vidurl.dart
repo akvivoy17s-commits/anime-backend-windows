@@ -580,7 +580,7 @@ class _UploadVideoUrlPageState extends State<UploadVideoUrlPage> {
     return NeoScaffold(
       overline: 'Admin // Link Upload',
       title: 'Upload Using URL',
-      maxWidth: 640,
+      maxWidth: 720,
       body: Form(
         key: _formKey,
         child: ListView(

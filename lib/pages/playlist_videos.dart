@@ -127,10 +127,10 @@ class _PlaylistVideosPageState extends State<PlaylistVideosPage> {
       final aData = a.data() ?? {};
       final bData = b.data() ?? {};
 
-      final aEpisode = _getEpisodeNumber(aData);
-      final bEpisode = _getEpisodeNumber(bData);
-
-      return aEpisode.compareTo(bEpisode);
+      // season first, then episode
+      final bySeason = _getSeasonNumber(aData).compareTo(_getSeasonNumber(bData));
+      if (bySeason != 0) return bySeason;
+      return _getEpisodeNumber(aData).compareTo(_getEpisodeNumber(bData));
     });
 
     // get the first episodes' stream links ready while the user looks at the list
@@ -258,6 +258,25 @@ class _PlaylistVideosPageState extends State<PlaylistVideosPage> {
   }
 
   // ===========================================================
+  // GET SEASON (stored in Firestore as `season`)
+  // ===========================================================
+
+  String _getSeason(Map<String, dynamic> data) {
+    for (final field in const ['season', 'seasonNumber']) {
+      final value = data[field];
+      if (value != null && value.toString().trim().isNotEmpty) {
+        return value.toString().trim();
+      }
+    }
+    return '';
+  }
+
+  int _getSeasonNumber(Map<String, dynamic> data) {
+    final m = RegExp(r'\d+').firstMatch(_getSeason(data));
+    return m == null ? 0 : (int.tryParse(m.group(0)!) ?? 0);
+  }
+
+  // ===========================================================
   // GET EPISODE TEXT
   // ===========================================================
 
@@ -382,6 +401,7 @@ class _PlaylistVideosPageState extends State<PlaylistVideosPage> {
                   child: _videoCard(
                     videoId: doc.id,
                     title: _getTitle(data),
+                    season: _getSeason(data),
                     episode: _getEpisode(data),
                     thumbnail: _getThumbnailUrl(data),
                   ),
@@ -400,6 +420,7 @@ class _PlaylistVideosPageState extends State<PlaylistVideosPage> {
   Widget _videoCard({
     required String videoId,
     required String title,
+    required String season,
     required String episode,
     required String thumbnail,
   }) {
@@ -486,8 +507,15 @@ class _PlaylistVideosPageState extends State<PlaylistVideosPage> {
                 mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  if (episode.isNotEmpty) ...[
-                    NeoTag('EP $episode', color: Neo.cyan),
+                  if (season.isNotEmpty || episode.isNotEmpty) ...[
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        if (season.isNotEmpty) NeoTag('SEASON $season', color: Neo.violet),
+                        if (episode.isNotEmpty) NeoTag('EP $episode', color: Neo.cyan),
+                      ],
+                    ),
                     const SizedBox(height: 6),
                   ],
                   Text(

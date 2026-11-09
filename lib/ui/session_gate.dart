@@ -5,7 +5,7 @@ import '../services/session_service.dart';
 import 'neo.dart';
 
 /// Shows [child] only while this user holds a login slot.
-/// While the slot is being checked -> spinner. Limit reached -> explanation screen.
+/// The slot is checked in the background (no spinner). Limit reached -> explanation screen.
 class SessionGate extends StatelessWidget {
   final Widget child;
   const SessionGate({super.key, required this.child});
@@ -19,30 +19,9 @@ class SessionGate extends StatelessWidget {
         if (s == SessionStatus.blocked && SessionService.isFor(uid)) {
           return const _LimitReachedView();
         }
-        if (s == SessionStatus.active && SessionService.isFor(uid)) {
-          return child;
-        }
-        return const Scaffold(
-          backgroundColor: Neo.bg,
-          body: Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CircularProgressIndicator(color: Neo.cyan),
-                SizedBox(height: 16),
-                Text(
-                  'CHECKING SESSION…',
-                  style: TextStyle(
-                    color: Neo.muted,
-                    fontFamily: Neo.mono,
-                    fontSize: 11,
-                    letterSpacing: 2,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
+        // Home shows immediately; the session check runs silently in the background.
+        // Only the "limit reached" case replaces the screen (see SessionService._block).
+        return child;
       },
     );
   }

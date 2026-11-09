@@ -455,6 +455,12 @@ class _ManageVideoPageState extends State<ManageVideoPage>
   // ADD MULTIPLE VIDEOS
   // =========================================================
 
+  /// Movies are stand-alone titles: they can never be put inside a playlist.
+  bool _isMovieData(Map<String, dynamic>? data) {
+    final c = (data?['category'] ?? '').toString().trim().toLowerCase();
+    return c == 'movies' || c == 'movie';
+  }
+
   Future<int> addMultipleVideosToPlaylist(
     String playlistId,
     List<String> videoIds,
@@ -465,8 +471,17 @@ class _ManageVideoPageState extends State<ManageVideoPage>
 
     final assignedIds = await getAssignedVideoIds();
 
+    // safety net: drop movies even if one slipped into the selection
+    final movieIds = <String>{};
+    await Future.wait(videoIds.map((id) async {
+      try {
+        final d = await _firestore.collection('videos').doc(id).get();
+        if (_isMovieData(d.data())) movieIds.add(id);
+      } catch (_) {}
+    }));
+
     final safeVideoIds = videoIds.where((id) {
-      return !assignedIds.contains(id);
+      return !assignedIds.contains(id) && !movieIds.contains(id);
     }).toList();
 
     if (safeVideoIds.isEmpty) {
@@ -1308,7 +1323,7 @@ class _ManageVideoPageState extends State<ManageVideoPage>
       final assignedVideoIds = await getAssignedVideoIds();
 
       final availableVideos = videosSnapshot.docs.where((doc) {
-        return !assignedVideoIds.contains(doc.id);
+        return !assignedVideoIds.contains(doc.id) && !_isMovieData(doc.data());
       }).toList();
 
       availableVideos.sort((a, b) {
@@ -2310,7 +2325,7 @@ physics: const AlwaysScrollableScrollPhysics(),
     return NeoScaffold(
       overline: 'Admin // Library',
       title: 'Manage Videos',
-      maxWidth: 820,
+      maxWidth: 960,
       fab: AnimatedBuilder(
         animation: _tabController,
         builder: (context, child) {

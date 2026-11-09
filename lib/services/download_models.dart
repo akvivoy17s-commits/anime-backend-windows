@@ -17,6 +17,7 @@ class DownloadRecord {
   final String error;
   final int createdAt;
   final bool gallery; // a copy was saved to the device Gallery / Photos
+  final String dir; // '' = app storage (default), otherwise the absolute folder chosen by the user
 
   const DownloadRecord({
     required this.id,
@@ -34,6 +35,7 @@ class DownloadRecord {
     this.error = '',
     required this.createdAt,
     this.gallery = false,
+    this.dir = '',
   });
 
   bool get isActive => state == DlState.queued || state == DlState.running;
@@ -64,6 +66,7 @@ class DownloadRecord {
         error: error ?? this.error,
         createdAt: createdAt,
         gallery: gallery ?? this.gallery,
+        dir: dir,
       );
 
   Map<String, dynamic> toJson() => {
@@ -81,6 +84,7 @@ class DownloadRecord {
         'error': error,
         'createdAt': createdAt,
         'gallery': gallery,
+        'dir': dir,
       };
 
   static DownloadRecord? fromJson(Object? j) {
@@ -102,6 +106,7 @@ class DownloadRecord {
         error: (j['error'] ?? '') as String,
         createdAt: ((j['createdAt'] ?? 0) as num).toInt(),
         gallery: j['gallery'] == true,
+        dir: (j['dir'] ?? '') as String,
       );
     } catch (_) {
       return null;

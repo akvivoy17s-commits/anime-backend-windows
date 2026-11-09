@@ -178,6 +178,7 @@ class Tilt3D extends StatefulWidget {
 class _Tilt3DState extends State<Tilt3D> {
   Offset _o = Offset.zero; // -1..1
   bool _down = false;
+  bool _hover = false;
 
   void _upd(Offset local, Size s) {
     setState(() {
@@ -199,7 +200,11 @@ class _Tilt3DState extends State<Tilt3D> {
     return LayoutBuilder(
       builder: (context, c) {
         final size = Size(c.maxWidth, c.maxHeight);
-        return GestureDetector(
+        return MouseRegion(
+          cursor: SystemMouseCursors.click,
+          onEnter: (_) => setState(() => _hover = true),
+          onExit: (_) => setState(() => _hover = false),
+          child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: widget.onTap,
           onTapDown: (d) => _upd(d.localPosition, size),
@@ -215,11 +220,12 @@ class _Tilt3DState extends State<Tilt3D> {
                 ..rotateX(-o.dy * 0.14)
                 ..rotateY(o.dx * 0.14);
               return Transform.scale(
-                scale: _down ? 0.97 : 1.0,
+                scale: _down ? 0.97 : (_hover ? 1.035 : 1.0),
                 child: Transform(alignment: Alignment.center, transform: m, child: child),
               );
             },
             child: widget.child,
+          ),
           ),
         );
       },
@@ -497,6 +503,7 @@ class GlassIconButton extends StatelessWidget {
       shape: CircleBorder(side: BorderSide(color: Neo.line)),
       child: InkWell(
         customBorder: const CircleBorder(),
+        hoverColor: Neo.cyan.withValues(alpha: 0.14),
         onTap: onTap,
         child: SizedBox(
           width: 44,

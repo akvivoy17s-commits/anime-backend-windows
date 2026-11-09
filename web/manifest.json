@@ -1,11 +1,11 @@
 {
-    "name": "anime_app",
-    "short_name": "anime_app",
+    "name": "Anime Portal",
+    "short_name": "Anime Portal",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#000418",
+    "theme_color": "#000418",
+    "description": "Anime Portal - watch anime online",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

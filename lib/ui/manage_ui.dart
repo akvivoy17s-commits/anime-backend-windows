@@ -27,7 +27,7 @@ class NeoScaffold extends StatelessWidget {
     this.actions = const [],
     this.fab,
     this.bottom,
-    this.maxWidth = 760,
+    this.maxWidth = 980,
     this.plainBg = false,
   });
 

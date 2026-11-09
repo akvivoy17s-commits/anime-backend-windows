@@ -1,8 +1,10 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+import '../services/download_service.dart';
 import '../services/last_watched_service.dart';
 import '../services/session_service.dart';
 import '../ui/media.dart';
+import '../ui/desktop.dart';
 import '../ui/neo.dart';
 import 'search.dart';
 import 'playlist_videos.dart';
@@ -32,9 +34,36 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+    DownloadService.openDownloadsTab.addListener(_openDownloads);
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (DownloadService.openDownloadsPending) {
+        _continuePopupShown = true; // opened from a download notification: go straight to Downloads
+        _openDownloads();
+        return;
+      }
       _showContinueWatchingPopup();
     });
+  }
+
+  @override
+  void dispose() {
+    DownloadService.openDownloadsTab.removeListener(_openDownloads);
+    super.dispose();
+  }
+
+  /// Download notification tapped -> close anything on top (player...) and show the Downloads tab.
+  void _openDownloads() {
+    if (!mounted) return;
+    final nav = SessionService.navigatorKey.currentState;
+    if (nav == null) {
+      // navigator not ready yet (cold start) -> try again on the next frame
+      WidgetsBinding.instance.addPostFrameCallback((_) => _openDownloads());
+      return;
+    }
+    DownloadService.openDownloadsPending = false;
+    // from ANY screen (player, profile, a dialog, a bottom sheet ...): close everything on top first
+    nav.popUntil((route) => route.isFirst);
+    setState(() => currentIndex = 4);
   }
 
   Future<void> _showContinueWatchingPopup() async {
@@ -163,28 +192,53 @@ class _HomePageState extends State<HomePage> {
       builder: (context, blocked, _) {
         final tabs = blocked ? const [0, 1, 2, 3, 5] : const [0, 1, 2, 3, 4, 5];
         final shown = tabs.contains(currentIndex) ? currentIndex : 0;
-        return Scaffold(
-          body: NeoBackground(
-            child: SafeArea(
-              bottom: false,
-              child: IndexedStack(
-                index: shown,
-                children: const [
-                  _HomeContent(),
-                  SeriesPage(),
-                  MoviesPage(),
-                  SavedPage(),
-                  DownloadsPage(),
-                  ProfilePage(),
-                ],
+        final pages = IndexedStack(
+          index: shown,
+          children: const [
+            _HomeContent(),
+            SeriesPage(),
+            MoviesPage(),
+            SavedPage(),
+            DownloadsPage(),
+            ProfilePage(),
+          ],
+        );
+        return LayoutBuilder(
+          builder: (context, c) {
+            final desk = Bp.isDesktop(c.maxWidth);
+            return Scaffold(
+              body: NeoBackground(
+                child: desk
+                    ? Row(
+                        children: [
+                          DesktopSideNav(
+                            index: shown,
+                            tabs: tabs,
+                            items: _NeoNavBar._items,
+                            onChanged: (i) => setState(() => currentIndex = i),
+                          ),
+                          Expanded(
+                            child: Align(
+                              alignment: Alignment.topCenter,
+                              child: ConstrainedBox(
+                                constraints: BoxConstraints(maxWidth: Bp.content(c.maxWidth)),
+                                child: SafeArea(bottom: false, child: pages),
+                              ),
+                            ),
+                          ),
+                        ],
+                      )
+                    : SafeArea(bottom: false, child: pages),
               ),
-            ),
-          ),
-          bottomNavigationBar: _NeoNavBar(
-            index: shown,
-            tabs: tabs,
-            onChanged: (i) => setState(() => currentIndex = i),
-          ),
+              bottomNavigationBar: desk
+                  ? null
+                  : _NeoNavBar(
+                      index: shown,
+                      tabs: tabs,
+                      onChanged: (i) => setState(() => currentIndex = i),
+                    ),
+            );
+          },
         );
       },
     );

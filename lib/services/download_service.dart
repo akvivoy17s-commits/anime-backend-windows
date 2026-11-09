@@ -6,6 +6,7 @@ import 'package:background_downloader/background_downloader.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:gal/gal.dart';
+import 'platform_flags.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -23,11 +24,26 @@ class DownloadService {
 
   static const _prefKey = 'dl_records_v1';
   static const _dir = 'anime_downloads';
+  static const _locKey = 'dl_location_v1';
   static const _group = 'anime_videos';
   static const disabledMsg = 'Downloads are currently disabled by the administrator.';
 
   /// All records on this device (all accounts). Use [forCurrentUser] for display.
   static final ValueNotifier<Map<String, DownloadRecord>> records = ValueNotifier({});
+
+  /// Where NEW downloads are saved: '' = app storage (default), otherwise an absolute folder.
+  static final ValueNotifier<String> location = ValueNotifier('');
+
+  /// Bumped when the user taps a download notification -> HomePage switches to the Downloads tab.
+  static final ValueNotifier<int> openDownloadsTab = ValueNotifier(0);
+
+  /// True when a notification tap arrived before HomePage existed (app was closed) -> HomePage consumes it.
+  static bool openDownloadsPending = false;
+
+  static void _onNotificationTap(Task task, NotificationType type) {
+    openDownloadsPending = true;
+    openDownloadsTab.value++;
+  }
 
   static bool _inited = false;
   static String? _uid;
@@ -54,7 +70,7 @@ class DownloadService {
 
   /// Absolute path of a finished file (null if the file is gone).
   static Future<String?> localPath(DownloadRecord r) async {
-    final p = await _taskFor(r.id, r.filename, 'x://x').filePath();
+    final p = await _taskFor(r.id, r.filename, 'x://x', dir: r.dir).filePath();
     return File(p).existsSync() ? p : null;
   }
 
@@ -64,9 +80,28 @@ class DownloadService {
   static Future<void> init() async {
     if (_inited) return;
     _inited = true;
+    // Register FIRST (before any await): a notification tap that launched the app must never be missed.
+    try {
+      FileDownloader().registerCallbacks(group: _group, taskNotificationTapCallback: _onNotificationTap);
+      FileDownloader().registerCallbacks(taskNotificationTapCallback: _onNotificationTap);
+    } catch (e) {
+      debugPrint('DownloadService.registerCallbacks: $e');
+    }
     try {
       await _load();
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        location.value = prefs.getString(_locKey) ?? '';
+      } catch (_) {}
       FileDownloader().configureNotification(
+        running: const TaskNotification('Downloading', '{displayName}'),
+        complete: const TaskNotification('Download complete', '{displayName}'),
+        error: const TaskNotification('Download failed', '{displayName}'),
+        paused: const TaskNotification('Download paused', '{displayName}'),
+        progressBar: true,
+      );
+      FileDownloader().configureNotificationForGroup(
+        _group,
         running: const TaskNotification('Downloading', '{displayName}'),
         complete: const TaskNotification('Download complete', '{displayName}'),
         error: const TaskNotification('Download failed', '{displayName}'),
@@ -135,7 +170,8 @@ class DownloadService {
       if (!auth.ok) return auth;
 
       final src = await _resolve(url);
-      final filename = '$id.${src.ext}';
+      final filename = _fileNameFor(id, title, src.ext, subtitle);
+      final dir = location.value; // folder chosen by the user ('' = app storage)
       _put(DownloadRecord(
         id: id,
         videoId: videoId,
@@ -144,11 +180,12 @@ class DownloadService {
         subtitle: subtitle,
         thumbnail: thumbnail,
         filename: filename,
+        dir: dir,
         total: src.total,
         createdAt: DateTime.now().millisecondsSinceEpoch,
       ));
       await _askNotificationPermissionOnce();
-      final ok = await FileDownloader().enqueue(_taskFor(id, filename, src.url, title: title));
+      final ok = await FileDownloader().enqueue(_taskFor(id, filename, src.url, title: title, dir: dir));
       if (!ok) {
         _fail(id, 'Could not start the download.');
         return const DlResult(false, 'Could not start the download.');
@@ -283,7 +320,7 @@ class DownloadService {
   static Future<void> _complete(String id) async {
     final r = records.value[id];
     if (r == null) return;
-    final path = await _taskFor(id, r.filename, 'x://x').filePath();
+    final path = await _taskFor(id, r.filename, 'x://x', dir: r.dir).filePath();
     final f = File(path);
     if (!f.existsSync() || f.lengthSync() == 0) return _fail(id, 'Downloaded file is missing.');
     // Drive sometimes answers 200 with an HTML error page: never keep that as a "video".
@@ -296,7 +333,7 @@ class DownloadService {
     final len = f.lengthSync();
     _set(id, (x) => x.copyWith(state: DlState.done, progress: 1, bytes: len, total: len, speedMBps: -1, error: ''),
         persist: true);
-    unawaited(saveToGallery(id)); // permission is requested only now (first finished download)
+    if (r.dir.isEmpty) unawaited(saveToGallery(id)); // (a custom folder is already visible to the user) // permission is requested only now (first finished download)
   }
 
   /// Re-checks records against the real files (call when the Downloads page opens / app resumes).
@@ -307,6 +344,7 @@ class DownloadService {
   static Future<DlResult> saveToGallery(String id) async {
     final r = records.value[id];
     if (r == null || !r.isDone) return const DlResult(false, 'Download is not finished yet.');
+    if (isWindows) return const DlResult(true, 'Saved on your PC.'); // no Gallery on Windows
     if (r.gallery) return const DlResult(true, 'Already in your Gallery.');
     final path = await localPath(r);
     if (path == null) return const DlResult(false, 'File not found.');
@@ -373,13 +411,108 @@ class DownloadService {
     }
   }
 
+  // ------------------------------------------------------------------ download location
+  /// Ready-made folders offered in the "Download location" sheet (Android only).
+  static Map<String, String> get presetFolders {
+    if (isWindows) {
+      final home = Platform.environment['USERPROFILE'] ?? '';
+      if (home.isEmpty) return const {};
+      return {
+        'Videos / Anime Portal': '$home\\Videos\\Anime Portal',
+        'Downloads / Anime Portal': '$home\\Downloads\\Anime Portal',
+      };
+    }
+    return const {
+      'Movies / Anime Portal': '/storage/emulated/0/Movies/Anime Portal',
+      'Download / Anime Portal': '/storage/emulated/0/Download/Anime Portal',
+    };
+  }
+
+  /// The default (app-private) folder, as a readable path.
+  static Future<String> defaultFolder() async {
+    try {
+      final p = await DownloadTask(url: 'x://x', filename: 'x', directory: _dir, baseDirectory: BaseDirectory.applicationSupport)
+          .filePath();
+      return File(p).parent.path;
+    } catch (_) {
+      return 'App storage';
+    }
+  }
+
+  /// Folder that new downloads go to right now (for display).
+  static Future<String> currentFolder() async => location.value.isEmpty ? defaultFolder() : location.value;
+
+  /// Sets the folder for NEW downloads ('' = back to app storage). Already finished downloads stay where they are.
+  static Future<DlResult> setLocation(String path) async {
+    var p = path.trim();
+    while (p.length > 1 && (p.endsWith('/') || p.endsWith('\\'))) {
+      p = p.substring(0, p.length - 1);
+    }
+    if (p.isNotEmpty) {
+      final okPath = isWindows ? RegExp(r'^[A-Za-z]:[\\/]').hasMatch(p) : p.startsWith('/');
+      if (!okPath) {
+        return DlResult(false,
+            isWindows ? r'Enter a full folder path, e.g. C:\Users\you\Videos\Anime Portal'
+                      : 'Enter a full folder path, e.g. /storage/emulated/0/Movies/Anime Portal');
+      }
+      try {
+        final d = Directory(p);
+        if (!d.existsSync()) d.createSync(recursive: true);
+        final t = File('$p${Platform.pathSeparator}.anime_portal_test.mp4'); // a video-type file, like the real downloads
+        t.writeAsBytesSync(const [0]);
+        t.deleteSync();
+      } catch (_) {
+        return const DlResult(
+            false,
+            "This folder can't be written by the app. Try Movies / Anime Portal, or allow "
+            "\"All files access\" for this app in the phone Settings and try again.");
+      }
+    }
+    location.value = p;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_locKey, p);
+    } catch (_) {}
+    return const DlResult(true);
+  }
+
   // ------------------------------------------------------------------ helpers
-  static DownloadTask _taskFor(String id, String filename, String url, {String title = ''}) => DownloadTask(
+  /// File name = the video's title + season/episode (e.g. "Naruto S01E05.mp4"); falls back to the id when the title is empty.
+  /// Season / episode come from [subtitle] ("S1 · EP 5 · EN"); nothing is added when the title already has them.
+  /// A numeric suffix keeps two downloads with the same title from overwriting each other.
+  static String _fileNameFor(String id, String title, String ext, [String subtitle = '']) {
+    String clean(String t) => t
+        .replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1F]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim()
+        .replaceAll(RegExp(r'^\.+|\.+$'), '')
+        .trim();
+    var base = clean(title);
+    if (base.length > 110) base = base.substring(0, 110).trim();
+    if (base.isEmpty) return '$id.$ext';
+
+    final sn = RegExp(r'(?:^|[\s·])S\w*?\s*(\d+)', caseSensitive: false).firstMatch(subtitle)?.group(1);
+    final ep = RegExp(r'EP\w*\s*(\d+)', caseSensitive: false).firstMatch(subtitle)?.group(1);
+    String pad(String n) => n.padLeft(2, '0');
+    final titleHasSE = RegExp(r'\bS(?:eason)?[\s._-]*\d+[\s._-]*E(?:p|pisode)?[\s._-]*\d+', caseSensitive: false).hasMatch(base);
+    final titleHasEp = RegExp(r'\bE(?:p|pisode)?[\s._-]*\d+', caseSensitive: false).hasMatch(base);
+    if (!titleHasSE && ep != null && !(titleHasEp && sn == null)) {
+      base = sn != null ? '$base S${pad(sn)}E${pad(ep)}' : '$base EP${pad(ep)}';
+    }
+    final used = records.value.values.where((r) => r.id != id).map((r) => r.filename.toLowerCase()).toSet();
+    var name = '$base.$ext';
+    for (var i = 2; used.contains(name.toLowerCase()); i++) {
+      name = '$base ($i).$ext';
+    }
+    return name;
+  }
+
+  static DownloadTask _taskFor(String id, String filename, String url, {String title = '', String dir = ''}) => DownloadTask(
         taskId: id,
         url: url,
         filename: filename,
-        directory: _dir,
-        baseDirectory: BaseDirectory.applicationSupport,
+        directory: dir.isEmpty ? _dir : dir,
+        baseDirectory: dir.isEmpty ? BaseDirectory.applicationSupport : BaseDirectory.root,
         group: _group,
         updates: Updates.statusAndProgress,
         retries: 3,
@@ -393,7 +526,7 @@ class DownloadService {
     records.value = next;
     _persistNow();
     if (r != null) {
-      await _deleteFile(await _taskFor(id, r.filename, 'x://x').filePath());
+      await _deleteFile(await _taskFor(id, r.filename, 'x://x', dir: r.dir).filePath());
     }
     try {
       await FileDownloader().database.deleteRecordWithId(id);
